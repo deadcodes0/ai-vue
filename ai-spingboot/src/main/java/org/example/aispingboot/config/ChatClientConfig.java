@@ -1,5 +1,6 @@
 package org.example.aispingboot.config;
 
+import org.example.aispingboot.AiService.PromptManage;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
@@ -21,6 +22,15 @@ public class ChatClientConfig {
     public ChatClient openAiChatClient(OpenAiChatModel openAiChatModel) {
         return ChatClient.builder(openAiChatModel)
                 .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory()).build())
-                .defaultSystem("你是一个专业的心理疏导师，温和耐心，善于倾听，能够提供专业的心理支持和建议").build();
+                .defaultSystem(PromptManage.PSYCHOLOGICAL_SUPPORT_SYSTEM_PROMPT).build();
+    }
+
+    /**
+     * 情绪分析专用 ChatClient：不挂 ChatMemory advisor（分析上下文直接拼入 prompt，
+     * 避免污染对话记忆、避免依赖记忆重建）
+     */
+    @Bean("emotion-analysis")
+    public ChatClient emotionAnalysisChatClient(OpenAiChatModel openAiChatModel) {
+        return ChatClient.builder(openAiChatModel).build();
     }
 }

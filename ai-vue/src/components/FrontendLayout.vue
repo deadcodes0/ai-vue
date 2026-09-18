@@ -42,7 +42,9 @@ const isLoggedIn = ref(false)
 
 // 登出
 const handleLogout = () => {
-    logout().then(() => {
+    // 登出本地清理必须无条件执行：token 过期时后端 /user/logout 返回 401，
+    // 若依赖 .then() 会卡在"清不掉的登录态"（JWT 无状态，后端本就是无操作端点）
+    logout().catch(() => {}).finally(() => {
         // 清除缓存
         localStorage.removeItem('token')
         localStorage.removeItem('userInfo')

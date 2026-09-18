@@ -16,10 +16,11 @@
              <div class="emotion-garden">
                 <div class="garden-header">
                     <div class="garden-title"> 情绪花园 </div>
+                    <div class="garden-analyzed-at">{{ formatAnalyzedAt(currentEmotion.analyzedAt) }}</div>
                 </div>
-                <div class="emotion-info">
-                    <div class="emotion-name">中性</div>
-                    <div class="emotion-score">50</div>
+                <div class="emotion-info" v-loading="emotionLoading">
+                    <div class="emotion-name">{{ currentEmotion.primaryEmotion }}</div>
+                    <div class="emotion-score">{{ currentEmotion.emotionScore }}</div>
                 </div>
                 <div class="warm-tips">
                     <div class="emotion-status-text">
@@ -60,6 +61,14 @@
                             <div class="notice-text">{{ currentEmotion.riskDescription }}</div>
                         </div>
                     </div>
+                      <!-- 危机干预静态保底卡片（纯静态渲染，不依赖LLM输出） -->
+                    <div class="risk-notice crisis-notice" v-if="currentEmotion.riskLevel === 3">
+                        <div class="notice-icon">📞</div>
+                        <div class="notice-content">
+                            <div class="notice-title">专业支持</div>
+                            <div class="notice-text">如果您正处于较大的痛苦中，请及时寻求专业帮助：全国心理援助热线 12356（24小时）。您不必独自承受这一切。</div>
+                        </div>
+                    </div>
                 </div>
              </div>
              <!-- 会话列表 -->
@@ -77,22 +86,19 @@
                                     {{ session.lastMessageContent }}
                                 </div>
                                 <div class="session-stats">
+                                    <span v-if="session.id === activeReplySessionId" class="generating-chip">生成中</span>
                                     <span>
                                         <el-icon>
                                             <ChatRound />
                                         </el-icon>
                                         {{ session.messageCount || 0 }}
                                     </span>
-                                    <span>
-                                        <el-icon>
-                                            <Clock />
-                                        </el-icon>
-                                        {{ session.durationMinutes || 0 }} 分钟
-                                    </span>
                                 </div>
                             </div>
                             <div class="session-actions">
-                                <el-button text type="danger" size="mini" @click="handleDeleteSession(session.id)">
+                                <!-- .stop 阻止冒泡到会话条目的 click：否则删除 B 会先切换视图到 B，
+                                     删除响应回来时误判"删的是当前会话"而跳回新对话 -->
+                                <el-button text type="danger" size="mini" @click.stop="handleDeleteSession(session.id)">
                                     <el-icon>
                                         <DeleteFilled />
                                     </el-icon>
@@ -177,7 +183,13 @@
                             <span>{{ userMessage.length }}/500</span>
                         </div>
                 </div>
-                <el-button :disabled="!userMessage.trim() || userMessage.length > 500" type="primary" class="send-btn" @click="sendMessage">
+                <!-- 生成期间切换为停止按钮：停止是显式命令（ADR 0009），残句落库后返回 -->
+                <el-button v-if="isAiTyping" type="warning" class="send-btn stop-btn" title="停止生成" @click="handleStop">
+                    <el-icon>
+                        <VideoPause />
+                    </el-icon>
+                </el-button>
+                <el-button v-else :disabled="!userMessage.trim() || userMessage.length > 500" type="primary" class="send-btn" @click="sendMessage">
                     <el-icon>
                         <Promotion />
                     </el-icon>
@@ -187,10 +199,10 @@
     </div>
 </template>
 <script setup>
-import { ref, onMounted } from 'vue'
-import { startSession, getSessionList, deleteSession, getSessionDetail, getSessionEmotion } from '@/api/frontend'
+import { ref, reactive, onMounted } from 'vue'
+import { startSession, getSessionList, deleteSession, getSessionDetail, getSessionEmotion, stopActiveReply, getActiveReply } from '@/api/frontend'
 import { ElMessage } from 'element-plus'
-import { ChatRound, DeleteFilled } from '@element-plus/icons-vue'
+import { ChatRound, DeleteFilled, VideoPause } from '@element-plus/icons-vue'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 
@@ -200,6 +212,8 @@ const iconUrl2 = new URL('@/assets/images/users.png', import.meta.url).href
 
 // 新建会话
 const createNewFrontendSession = () => {
+    // 导航自由（ADR 0009）：新建会话不再被生成状态拦截，
+    // 仅"发起新回复"受单活跃流约束（发送时守卫 + 后端 409）
     // 创建一个新的会话对象
     const newSession = {
         sessionId: `temp_${Date.now()}`,
@@ -207,6 +221,8 @@ const createNewFrontendSession = () => {
         sessionTitle: '新对话'
     }
     currentSession.value = newSession
+    // 清空消息区：新会话不携带上一个会话的历史消息（否则历史消息会"串台"到新会话视图）
+    messages.value = []
 }
 
 // 定义一个当前会话对象
@@ -217,8 +233,18 @@ const sessionList = ref([])
 const messages = ref([])
 // 定义用户输入消息
 const userMessage = ref('')
-// 定义AI助手是否正在输入
+// 定义AI助手是否正在输入（本用户存在活跃回复，含本标签页发起与刷新/其他标签页恢复）
 const isAiTyping = ref(false)
+// 活跃回复所属会话（数据库数字 id）；null 表示无活跃回复
+const activeReplySessionId = ref(null)
+// 本标签页发起的流式连接的 AbortController（停止/删除会话时中止本地接收）
+const activeCtrl = ref(null)
+// 停止/删除引发的主动中止：吞掉 abort 触发的 onerror，避免误报"AI回复失败"
+const deliberateStop = ref(false)
+// 会话数字 id → 本标签页流式中的 AI 消息对象：切换会话后切回可续显（对象仍被 onmessage 更新）
+const inflightAiMessages = new Map()
+// 活跃状态轮询定时器：仅用于本标签页未持有流的场景（刷新恢复），完成后刷新视图
+let activePollTimer = null
 
 // 情绪花园
 const currentEmotion = ref({
@@ -234,10 +260,31 @@ const loadSessionEmotion = (sessionId) => {
    // 确保sessionID格式正确
     const id = sessionId.toString().startsWith('session_') ? sessionId : `session_${sessionId}`
 
+    emotionLoading.value = true
     getSessionEmotion(id).then(res => {
-        console.log(res)
-        currentEmotion.value = res
+        currentEmotion.value = {
+            ...currentEmotion.value,
+            ...res,
+            improvementSuggestions: res.improvementSuggestions || []
+        }
+    }).catch(() => {
+        // 分析失败保持旧值不打扰用户，下次 GET 会重新分析
+    }).finally(() => {
+        emotionLoading.value = false
     })
+}
+
+// 分析中loading态
+const emotionLoading = ref(false)
+
+// 情绪快照时效标注
+const formatAnalyzedAt = (t) => {
+    if (!t) return '暂无分析'
+    const d = new Date(t)
+    if (isNaN(d.getTime())) return '暂无分析'
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    return `分析于 ${hh}:${mm}`
 }
 
 const getIntensityClass = (score) => {
@@ -278,18 +325,24 @@ const sendMessage = () => {
     if (!userMessage.value.trim()) return
 
     if (isAiTyping.value) {
-        ElMessage.error('AI助手正在输入中，请稍后')
+        ElMessage.error('您有一条AI回复正在生成中，请等待完成或点击停止')
         return
     }
 
     const message = userMessage.value.trim()
     userMessage.value = ''
 
+    console.log('currentSession', currentSession.value)
+    
     // 如果没有会话或者是临时会话，就需要创建一个新的会话
     if (currentSession.value.status === 'TEMP') {
+        //已有会话: currentSession.value：{sessionId: 'session_42', status: 'ACTIVE', sessionTitle: '宁渡AI助手 - 2026/9/16 11:26:37'}
+        //新建会话: currentSession.value：{sessionId: 'temp_1789548948131', status: 'TEMP', sessionTitle: '新对话'}
+        //sessionId不同是因为未落库
+        // startNewSession之后，currentSession.value 会被更新为正式会话，sessionId 也会被更新
        startNewSession(message)
     } else {
-        // 继续现有会话
+        // 继续现有会话 
         messages.value.push({
             id: Date.now(),
             senderType: 1,
@@ -313,8 +366,14 @@ const startNewSession = (message) => {
     }
     // 调用后端接口创建新会话
     startSession(sessionParams).then(res => {
-        console.log(res)
+       // 拦截器对非 200 业务码（如 409 活跃回复守卫，ADR 0009）不 reject 而是返回原始 response，需自行甄别
+       if (res && res.data && res.data.code && res.data.code !== '200') {
+           ElMessage.error(res.data.msg || '会话创建失败')
+           return
+       }
+       console.log('startSession', res)
        // 将后端返回的数据转为前端会话格式
+       //
        const sessionData = {
             sessionId: res.sessionId,
             status: res.status,
@@ -345,25 +404,31 @@ const startNewSession = (message) => {
 }
 
 const startAIResponse = (sessionId, userMessage) => {
-    // 防止重复发送
+    // 防止重复发送（输入框禁用为第一道锁，此处防御状态漂移与双开标签页）
     if (isAiTyping.value) {
-        ElMessage.error('AI助手正在输入中，请稍后')
+        ElMessage.error('您有一条AI回复正在生成中，请等待完成或点击停止')
         return
     }
-
     
     isAiTyping.value = true
+    deliberateStop.value = false
+    const numericId = Number(String(sessionId).replace('session_', ''))
+    activeReplySessionId.value = numericId
 
-    const aiMessage = {
+    const aiMessage = reactive({
         id: `ai_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         senderType: 2,
         content: '',
         createAt: new Date().toISOString()
-    }
+    })
+    // 对话框显示为AI头像，以及空白文本内容
     messages.value.push(aiMessage)
+    // 登记流式中的消息：切换会话后切回时续显（对象仍被下方闭包更新）
+    inflightAiMessages.set(numericId, aiMessage)
 
     // 调用流式接口
     const ctrl = new AbortController() // 用来中止fetch请求
+    activeCtrl.value = ctrl
     fetchEventSource('/api/psychological-chat/stream', {
         method: 'POST',
         headers: {
@@ -376,24 +441,36 @@ const startAIResponse = (sessionId, userMessage) => {
             userMessage
         }),
         signal: ctrl.signal,
+        // 禁用库的 visibilitychange 机制：切走标签页时中断连接、切回时用原 body 重新 POST，
+        // 导致同一条消息重复入库并触发多次 AI 回复
+        openWhenHidden: true,
+        //`onopen` ：只在 连接刚建立、收到 HTTP 响应头的那一刻 触发一次。此时 还看不到任何数据分片 （那要等`onmessage` ）。
         onopen: (response) => {
             console.log(response)
             if (response.headers.get('Content-Type') !== 'text/event-stream') {
                 ElMessage.error('服务器返回非流式数据')
             }
         },
+        //`onmessage` ：之后每收到一个事件（content 分片或 done）触发一次。
         onmessage: (event) => {
             const raw = event.data.trim()
             if (!raw) return
             const eventName = event.event
-            // 当前会话的AI消息
-            const aiMessage = messages.value[messages.value.length - 1]
+            // 注意：写入目标必须是上面闭包捕获的 aiMessage。
+            // 若按 messages[length-1] 回查，流式期间切换会话后分片会追加到别的会话的消息上（串台）
 
             if (eventName === 'done') {
+                // 后端契约（ADR 0009）：落库与槽位释放先于 done 事件，收到即可续聊
+                inflightAiMessages.delete(numericId)
                 isAiTyping.value = false
+                activeReplySessionId.value = null
                 ctrl.abort()
-                // 进行情绪分析
-                loadSessionEmotion(currentSession.value.sessionId)
+                // 情绪分析的数据侧仍绑流所属会话（ADR 0008）；但卡片只在正在查看该会话时刷新，
+                // 否则侧栏会显示与当前所看会话错位的情绪数据——切回时懒计算（ADR 0004）自动重算
+                if (currentSession.value && currentSession.value.sessionId === sessionId) {
+                    loadSessionEmotion(sessionId)
+                }
+                getSessionPage()
                 return
             }
             const payload = JSON.parse(raw)
@@ -401,31 +478,40 @@ const startAIResponse = (sessionId, userMessage) => {
             if (ok && payload.data && payload.data.content) {
                 aiMessage.content += payload.data.content
             } else if (!ok) {
-                // 错误回复的显示
-                handleError(payload.message || 'AI回复失败')
+                // 错误回复的显示（后端 Result 的消息字段为 msg），含 409 单活跃流守卫
+                handleError(aiMessage, payload.msg || 'AI回复失败')
+                inflightAiMessages.delete(numericId)
+                // 那 475 行 delete 在页面上的作用
+                // 它本身渲染不可见——只是 把`numericId` 从`inflightAiMessages` 里移除 。页面侧的影响是"后续效果"：
+                // - 你切走再切回这个会话时，`inflightAiMessages.get` 不再命中它（ L598 ），那条错误气泡会 在下次`getSessionDetail` 刷新消息时按后端数据替换/消失 （因为 409 那条消息没落库）；
+                // - 若 不 delete ，切回时代码会把它当"进行中的半截回复"拼回列表（ L600-601 ），一条本不该存在的错误气泡就会反复串台出现。所以 delete 是为了 不让这条假"进行中"消息残留、避免切会话时串台 。
+                activeReplySessionId.value = null
+                ctrl.abort()
+                // 守卫错误说明服务器上确有活跃回复（可能来自其他标签页）：向服务器状态对齐
+                restoreActiveReply()
             }
         },
         onerror: (err) => {
-            handleError(err || 'AI回复失败')
+            if (deliberateStop.value) return
+            handleError(aiMessage, err || 'AI回复失败')
+            inflightAiMessages.delete(numericId)
+            // 连接异常但服务端可能仍在生成（断开不取消，ADR 0009）：以服务器状态为准恢复锁定
+            restoreActiveReply()
             throw err
-        },
-        onclose: () => {
-            // 开始情绪分析
-            loadSessionEmotion(currentSession.value.sessionId)
         }
     })
 
 }
 
-// 错误处理函数
-const handleError = (error) => {
-    // 当前会话的AI消息
-    const aiMessage = messages.value[messages.value.length - 1]
-    if (aiMessage) {
-        aiMessage.content = 'AI回复失败，请重试'
+// 错误处理函数（透传后端具体错误信息；targetMessage 必须是流启动时闭包捕获的那条 AI 消息，
+// 不能按 messages[length-1] 回查，否则错误信息会写到别的会话的消息上）
+const handleError = (targetMessage, error) => {
+    const msgText = typeof error === 'string' && error.trim() ? error : 'AI回复失败，请重试'
+    if (targetMessage) {
+        targetMessage.content = msgText
     }
     isAiTyping.value = false
-    ElMessage.error('AI回复失败，请重试')
+    ElMessage.error(msgText)
 }
 
 const getSessionPage = () => {
@@ -434,20 +520,146 @@ const getSessionPage = () => {
         pageSize: 10
     }).then(res => {
         console.log(res)
+
         sessionList.value = res.records
     })
 }
 
+// 重连观看（ADR 0010）：向服务器接回活跃回复的观察流——先收已生成半截的回放，再续收实时片段。
+// 适用于刷新后点入生成中会话、或本标签页未持有流的切回场景（事件结构与 /stream 完全一致）；
+// 本标签页自己发起的流走 inflightAiMessages 本地续显，无需 attach。
+// 返回 AI 气泡对象供调用方并入消息列表；写回目标必须是该闭包对象（防串台，同 startAIResponse）
+const attachActiveReply = (dbSessionId) => {
+    //一次性返回之前所有历史消息，再续收实时片段
+    const aiMessage = reactive({
+        id: `ai_attach_${dbSessionId}_${Date.now()}`,
+        senderType: 2,
+        content: '',
+        createdAt: ''
+    })
+    // 登记流式中的消息：attach 期间切走再切回可续显（对象仍被下方 onmessage 更新）
+    inflightAiMessages.set(dbSessionId, aiMessage)
+
+    const ctrl = new AbortController()
+    activeCtrl.value = ctrl
+    deliberateStop.value = false
+
+    fetchEventSource(`/api/psychological-chat/stream/attach/${dbSessionId}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Token': localStorage.getItem('token'),
+            'Accept': 'text/event-stream'
+        },
+        signal: ctrl.signal,
+        openWhenHidden: true,
+        onmessage: (event) => {
+            const raw = event.data.trim()
+            if (!raw) return
+            const eventName = event.event
+            if (eventName === 'done') {
+                // 与 /stream 的 done 同契约（ADR 0009）：落库与槽位释放先于 done，收到即可续聊
+                inflightAiMessages.delete(dbSessionId)
+                isAiTyping.value = false
+                activeReplySessionId.value = null
+                stopActivePolling()
+                ctrl.abort()
+                if (currentSession.value && currentSession.value.sessionId === 'session_' + dbSessionId) {
+                    loadSessionEmotion('session_' + dbSessionId)
+                }
+                getSessionPage()
+                return
+            }
+            const payload = JSON.parse(raw)
+            const ok = String(payload.code) === '200'
+            if (ok && payload.data && payload.data.content) {
+                aiMessage.content += payload.data.content
+            } else if (!ok) {
+                // 404 扑空（回复恰在 attach 前完成）：清本地占位，回源拉库（可能已含完整回复）
+                inflightAiMessages.delete(dbSessionId)
+                isAiTyping.value = false
+                activeReplySessionId.value = null
+                ctrl.abort()
+                if (currentSession.value && currentSession.value.sessionId === 'session_' + dbSessionId) {
+                    refreshSessionView(dbSessionId)
+                }
+                // 若活跃回复其实在别的会话（客户端状态漂移），向服务器状态对齐
+                restoreActiveReply()
+            }
+        },
+        onerror: (err) => {
+            if (deliberateStop.value) return
+            // 连接异常：断开不取消（ADR 0009），回退轮询向服务器状态对齐
+            inflightAiMessages.delete(dbSessionId)
+            restoreActiveReply()
+            throw err
+        }
+    })
+
+    return aiMessage
+}
+
 // 获取会话数据
 const handleSessionClick = (session) => {
+    // 导航自由（ADR 0009）：切换会话不再被生成状态拦截
     console.log(session, 'session')
     // 点击会话时，获取会话详情
     getSessionDetail(session.id).then(res => {
-        console.log(res)
-        messages.value = res
+        console.log('getSessionDetail', res)
+        const list = res || []
+        // 流式中的回复仍属其会话：本标签页发起的流切回后续显（闭包对象仍被 onmessage 更新）；
+        // 刷新/其他来源恢复的活跃回复走重连观看（ADR 0010）：attach 回放半截并续收实时片段
+        
+        const inflight = inflightAiMessages.get(session.id)
+        //有一个活跃会话（AI正在回答），一个非活跃会话，现在来回切换历史会话
+        console.log('inflight', inflight)
+        // console.log打印结果：
+        // 切为活跃会话：inflight Proxy(Object) {id: 'ai_1789545667136_yb7ewmb25', senderType: 2, content: '\n哇～听到你说“好吃”我就忍不住要流口水啦！🤤 豪赤的魅力果然无法', createAt: '2026-09-16T08:01:07.136Z'}
+        // 切为非活跃会话（inflightAiMessages中存储的是活跃会话对象）：inflight undefined 
+        // 切为活跃会话（content内容追加，详见startAIResponse的onmessage函数）：Proxy(Object) {id: 'ai_1789545667136_yb7ewmb25', senderType: 2, content: '\n哇～听到你说“好吃”我就忍不住要流口水啦！🤤 豪赤的魅力果然无法抵挡！你是不是已经沉浸在美食带来的幸福感中了？', createAt: '2026-09-16T08:01:07.136Z'}
+        // 切为非活跃会话 同理
+        // 切为活跃会话：inflight undefined 
+        
+        console.log('messages', messages.value)
+        if (inflight) {
+            //情况1：在有活跃会话的前提下，切换历史会话，又切回活跃会话
+            //注意，list和inflight它们的字段并不一致，这是因为inflight还未落库
+            //这是list的字段，inflight字段上面有
+            //{
+            //     "id": 289,
+            //     "sessionId": 42,
+            //     "senderType": 1,
+            //     "senderTypeDesc": "用户",
+            //     "messageType": 1,
+            //     "messageTypeDesc": "文本",
+            //     "content": "好吃",
+            //     "emotionTag": null,
+            //     "aiModel": null,
+            //     "createdAt": "2026-09-16T16:01:07",
+            //     "contentLength": 2
+            // }
+            //messages.value 是一个数组，如下所示：
+            // ...
+            // 24: {id: 288, sessionId: 42, senderType: 1, senderTypeDesc: '用户', messageType: 1, …}
+            // 25: {id: 289, sessionId: 42, senderType: 1, senderTypeDesc: '用户', messageType: 1, …}
+            // 26: Proxy(Object) {id: 'ai_1789545667136_yb7ewmb25', senderType: 2, content: '\n哇～听到你说“好吃”我就忍不住要流口水啦！🤤 豪赤的魅力果然无法抵挡！你是不是已经沉浸在美食带来…享受美食的同时也要照顾好自己，吃出健康才是长久之计～你最近有没有发现什么新美食？快和我分享吧！😉', createAt: '2026-09-16T08:01:07.136Z'}
+
+            messages.value = [...list, inflight]
+        } else if (isAiTyping.value && activeReplySessionId.value === session.id) {
+            // 情况2：在有活跃会话的前提下，关闭标签页，再重新打开（换句话说，能触发 OnMounted）
+            // 需要配合 OnMounted 中的 restoreActiveReply() 理解
+            messages.value = [...list, attachActiveReply(session.id)]
+        } else {
+            //情况3：没有活跃会话
+            messages.value = list
+        }
+    }).catch(err => {
+        // 请求失败：清空消息区，避免残留上一会话的历史消息（"串台"）
+        messages.value = []
+        ElMessage.error('加载会话消息失败，请稍后重试')
     })
     loadSessionEmotion(session.id)
-    // 更新当前会话对象数据
+    // 更新当前会话对象数据，因为会话切换了，session.id也会切换
     const sessionData = {
         sessionId: "session_" + session.id,
         status: 'ACTIVE',
@@ -457,8 +669,23 @@ const handleSessionClick = (session) => {
 }
 
 const handleDeleteSession = (sessionId) => {
+    // 删除优先（ADR 0009）：被删会话若有活跃回复，后端终止生成且残句不落库（会话退出业务流程）
     deleteSession(sessionId).then(res => {
         ElMessage.success('删除成功')
+        if (activeReplySessionId.value === sessionId) {
+            // 本标签页正在接收该会话的流：后端已终止，主动中止本地接收
+            deliberateStop.value = true
+            activeCtrl.value?.abort()
+            inflightAiMessages.delete(sessionId)
+            isAiTyping.value = false
+            activeReplySessionId.value = null
+            stopActivePolling()
+        }
+        // 删的是当前会话 → 清空聊天区，回到新对话状态
+        if (currentSession.value && currentSession.value.sessionId === 'session_' + sessionId) {
+            messages.value = []
+            createNewFrontendSession()
+        }
         getSessionPage()
     })
 }
@@ -468,11 +695,88 @@ const formatMessageContent = (content) => {
     return content.replace(/\n/g, '<br>')
 }
 
+// 显式停止（ADR 0009）：停止是命令而非断开连接；后端落残句并释放槽位后返回，
+// 随后 done 事件/abort 收尾本地连接，正在查看该会话时刷新出残句
+const handleStop = async () => {
+    try {
+        await stopActiveReply()
+    } catch {
+        // 无活跃回复（404）等：仍走本地清理
+    } finally {
+        deliberateStop.value = true
+        activeCtrl.value?.abort()
+        const sid = activeReplySessionId.value
+        if (sid != null) inflightAiMessages.delete(sid)
+        isAiTyping.value = false
+        activeReplySessionId.value = null
+        stopActivePolling()
+        if (sid != null && currentSession.value?.sessionId === 'session_' + sid) {
+            refreshSessionView(sid)
+        }
+        getSessionPage()
+    }
+}
+
+// 活跃回复状态恢复（ADR 0009）：刷新后向服务器对齐"有一条回复正在生成"的事实，
+// 恢复输入锁定态与列表徽标；本地连接异常（done 丢失）时也以此向服务器对齐
+const restoreActiveReply = async () => {
+    try {
+        const active = await getActiveReply()// ← 向服务器查询真实状态
+        if (active && active.sessionId) {// ← 服务器说"有"才锁
+            isAiTyping.value = true
+            activeReplySessionId.value = active.sessionId
+            startActivePolling()
+        }
+    } catch {
+        // 未登录或网络异常：忽略，界面按无活跃回复处理
+    }
+}
+
+// 刷新指定会话的视图与情绪卡片（停止/轮询完成后的数据回填）
+const refreshSessionView = (dbSessionId) => {
+    getSessionDetail(dbSessionId).then(res => {
+        messages.value = res || []
+    })
+    loadSessionEmotion(dbSessionId)
+}
+
+// 轮询活跃状态：仅本标签页未持有流的场景需要（刷新恢复/其他标签页发起）。
+// 本标签页自己发起的流由 done 事件收尾，无需轮询。
+const startActivePolling = () => {
+    if (activePollTimer) return
+    activePollTimer = setInterval(async () => {
+        try {
+            const active = await getActiveReply()
+            if (!active || !active.sessionId) {
+                const sid = activeReplySessionId.value
+                isAiTyping.value = false
+                activeReplySessionId.value = null
+                stopActivePolling()
+                if (sid != null && currentSession.value?.sessionId === 'session_' + sid) {
+                    refreshSessionView(sid)
+                }
+                getSessionPage()
+            }
+        } catch {
+            // 查询失败：下个周期重试
+        }
+    }, 3000)
+}
+
+const stopActivePolling = () => {
+    if (activePollTimer) {
+        clearInterval(activePollTimer)
+        activePollTimer = null
+    }
+}
+
 onMounted(() => {
     // 初始化时获取会话列表
     getSessionPage()
     // 初始化时创建一个新会话
     createNewFrontendSession()
+    // 恢复活跃回复状态（刷新后服务器上可能仍有生成中的回复）
+    restoreActiveReply()
 })
 </script>
 <style scoped lang="scss">
@@ -617,11 +921,18 @@ onMounted(() => {
                                     align-items: center;
                                     gap: 4px;
                                 }
+                                .generating-chip {
+                                    background: linear-gradient(135deg, #fb923c, #f59e0b);
+                                    color: #fff;
+                                    padding: 1px 8px;
+                                    border-radius: 10px;
+                                    font-size: 11px;
+                                }
                             }
                         }
                         .session-actions {
                             position: absolute;
-                            top: 10px;
+                            top: 30px;
                             right: 12px;
                         }
                     }
@@ -658,6 +969,10 @@ onMounted(() => {
                     font-size: 16px;
                     font-weight: 600;
                     color: #8b4513;
+                }
+                .garden-analyzed-at {
+                    font-size: 11px;
+                    color: #a8927a;
                 }
             }
             .emotion-info {
@@ -812,6 +1127,18 @@ onMounted(() => {
                     gap: 12px;
                     border: 1px solid rgba(255, 234, 167, 0.6);
                     box-shadow: 0 6px 20px rgba(255, 234, 167, 0.3);
+                    &.crisis-notice {
+                        margin-top: 20px;
+                        background: linear-gradient(135deg, #fff0f0, #ffd6d6);
+                        border: 1px solid rgba(255, 150, 150, 0.6);
+                        box-shadow: 0 6px 20px rgba(255, 150, 150, 0.3);
+                        .notice-title {
+                            color: #c0392b;
+                        }
+                        .notice-text {
+                            color: #a93226;
+                        }
+                    }
                     .notice-icon {
                         font-size: 20px;
                         flex-shrink: 0;
@@ -971,6 +1298,7 @@ onMounted(() => {
             }
         }
         .chat-input {
+
             border-top: 1px solid rgba(251, 146, 60, 0.1);
             padding: 20px 24px;
             display: flex;
@@ -998,6 +1326,10 @@ onMounted(() => {
                 border: none !important;
                 box-shadow: 0 6px 20px rgba(251, 146, 60, 0.25);
                 transition: all 0.3s ease;
+                &.stop-btn {
+                    background: linear-gradient(135deg, #f87171 0%, #ef4444 100%) !important;
+                    box-shadow: 0 6px 20px rgba(239, 68, 68, 0.25);
+                }
             }
 
         }

@@ -44,4 +44,10 @@ public class User {
         return Result.ok(result);
     }
 
+    // 用户退出登录接口（JWT无状态，前端清除本地token即可）
+    @PostMapping("/logout")
+    public Result<Void> logout() {
+        return Result.ok();
+    }
+
 }

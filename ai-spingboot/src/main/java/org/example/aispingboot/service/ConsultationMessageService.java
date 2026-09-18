@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Service
 public class ConsultationMessageService {
@@ -62,6 +63,27 @@ public class ConsultationMessageService {
         ConsultationMessage lastMessage = consultationMessageMapper.selectOne(queryWrapper);
         return lastMessage != null ? convertToResponseDTO(lastMessage) : null;
 
+    }
+
+    // 按会话查询全部消息（id 升序，用于会话详情回放）
+    public List<ConsultationMessageResponseDTO> listMessagesBySessionId(Long sessionId) {
+        LambdaQueryWrapper<ConsultationMessage> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(ConsultationMessage::getSessionId, sessionId)
+                .orderByAsc(ConsultationMessage::getId);
+
+        return consultationMessageMapper.selectList(queryWrapper).stream()
+                .map(this::convertToResponseDTO)
+                .toList();
+    }
+
+    // 取会话最近 N 条消息（id 倒序，用于重建对话记忆）
+    public List<ConsultationMessage> getRecentMessages(Long sessionId, int limit) {
+        LambdaQueryWrapper<ConsultationMessage> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(ConsultationMessage::getSessionId, sessionId)
+                .orderByDesc(ConsultationMessage::getId)
+                .last("limit " + limit);
+
+        return consultationMessageMapper.selectList(queryWrapper);
     }
 
     private ConsultationMessageResponseDTO convertToResponseDTO(ConsultationMessage message) {

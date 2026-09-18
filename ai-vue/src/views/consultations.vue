@@ -9,7 +9,10 @@
             </el-table-column>
             <el-table-column label="情绪日志">
                 <template #default="scope">
-                    <div class="session-title">{{ scope.row.sessionTitle }}</div>
+                    <div class="session-title">
+                        {{ scope.row.sessionTitle }}
+                        <el-tag v-if="scope.row.deleted" size="small" type="danger">用户已删除</el-tag>
+                    </div>
                     <div class="session-preview">{{ scope.row.lastMessageContent }}</div>
                 </template>
             </el-table-column>

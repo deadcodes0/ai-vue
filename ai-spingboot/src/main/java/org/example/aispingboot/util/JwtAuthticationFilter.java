@@ -1,6 +1,8 @@
 package org.example.aispingboot.util;
 
 import cn.hutool.json.JSONUtil;
+import com.auth0.jwt.exceptions.JWTVerificationException;
+import com.auth0.jwt.exceptions.TokenExpiredException;
 import jakarta.annotation.Resource;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -44,8 +46,19 @@ public class JwtAuthticationFilter extends OncePerRequestFilter {
         // 1. 提取 JWT token
         String token = JwtTokenUtil.extractTokenFromRequest(request);
         if (StringUtils.hasText(token)) {
-            // 2. 验证token并获取用户信息
-            JwtTokenUtil.TokenVerificationResult validationResult = JwtTokenUtil.validateToken(token);
+            // 2. 验证token并获取用户信息（捕获验证异常，避免异常冒泡触发ERROR转发导致403空响应）
+            JwtTokenUtil.TokenVerificationResult validationResult;
+            try {
+                validationResult = JwtTokenUtil.validateToken(token);
+            } catch (TokenExpiredException e) {
+                clearSecurityContext();
+                ResponseUtil.writeError(response, ResultCode.TOKEN_EXPIRED);
+                return;
+            } catch (JWTVerificationException e) {
+                clearSecurityContext();
+                ResponseUtil.writeError(response, ResultCode.TOKEN_INVALID);
+                return;
+            }
             if (validationResult != null && validationResult.isValid()) {
                 // 3. 查询用户信息验证用户的状态
                 UserLoginResponseDTO.UserDetailResponseDTO user = userService.getUserById(validationResult.getUserId());

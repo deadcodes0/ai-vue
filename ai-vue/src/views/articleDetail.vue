@@ -13,7 +13,7 @@
                     <el-tag size="large" class="category-tag">{{ articleDetail.categoryName }}</el-tag>
                     <div class="flex-box">
                         <el-icon><List /></el-icon>
-                        <span>{{ dayjs(articleDetail.updatedAt).format('YYYY-MM-DD') }}</span>
+                        <span>{{ dayjs(articleDetail.publishedAt).format('YYYY-MM-DD') }}</span>
                     </div>
                 </div>
                 <h1 class="article-title">{{ articleDetail.title }}</h1>

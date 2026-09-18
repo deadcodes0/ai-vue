@@ -36,7 +36,7 @@
                         </div>
                         <div class="flex-box">
                             <el-icon><List /></el-icon>
-                            <span>{{ dayjs(item.updatedAt).format('YYYY-MM-DD') }}</span>
+                            <span>{{ dayjs(item.publishedAt).format('YYYY-MM-DD') }}</span>
                         </div>
                     </div>
                     <div :style="{marginTop: '10px'}">
@@ -70,6 +70,7 @@
     
     import iconUrl from '@/assets/images/book.png'
     import { Platform } from '@element-plus/icons-vue'
+    import { fileBaseUrl } from '@/config'
 
     // 推荐阅读列表
     const recommendList = ref([])
@@ -94,9 +95,9 @@
             pagination.total = res.total
         })
     }
-    // 获取封面图片
+    // 获取封面图片（有封面走本地后端静态服务，无封面用占位图）
     const getImage = (url) => {
-        return url ? 'http://159.75.169.224:1235' + url : 'https://file.itndedu.com/psychology_ai.png'
+        return url ? fileBaseUrl + url : 'https://file.itndedu.com/psychology_ai.png'
     }
 
     const handleChange = (page) => {

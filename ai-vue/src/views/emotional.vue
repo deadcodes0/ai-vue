@@ -3,10 +3,17 @@
         <PageHead title="情绪日志" />
         <TableSearch :formItem="formItem" @search="handleSearch" />
         <el-table :data="tableData" style="width: 100%">
-            <el-table-column prop="id" label="用户ID" width="80" />
-            <el-table-column label="会话ID" width="80">
+            <el-table-column prop="id" label="日记ID" width="80" />
+            <el-table-column prop="userId" label="用户ID" width="80" />
+            <el-table-column label="用户" width="120">
                 <template #default="scope">
-                    <el-avatar>{{ scope.row.nickname }}</el-avatar>
+                    {{ scope.row.nickname || scope.row.username || '-' }}
+                </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+                <template #default="scope">
+                    <el-tag v-if="scope.row.deleted" type="info">已删除</el-tag>
+                    <el-tag v-else type="success">正常</el-tag>
                 </template>
             </el-table-column>
             <el-table-column prop="diaryDate" label="记录日期" width="120" />
@@ -78,7 +85,7 @@
                 </div>
                 <div class="detail-section">
                     <h4>AI情绪分析结果</h4>
-                    <div class="ai-analysis-result">
+                    <div class="ai-analysis-result" v-if="aiData && aiData.primaryEmotion">
                         <el-descriptions :column="2" border>
                             <el-descriptions-item label="主要情绪">
                                 <el-tag :type="getAiEmotionTagType(aiData.primaryEmotion)">{{
@@ -89,7 +96,7 @@
                                     :color="getEmotionScoreColor(aiData.emotionScore)" :stroke-width="8" />
                             </el-descriptions-item>
                             <el-descriptions-item label="风险等级">
-                                <el-tag :type="getAiEmotionTagType(aiData.riskLevel)">{{ aiData.riskLevel }}</el-tag>
+                                <el-tag :type="getRiskLevelTagType(aiData.riskLevel)">{{ getRiskLevelText(aiData.riskLevel) }}</el-tag>
                             </el-descriptions-item>
                             <el-descriptions-item label="情绪性质">
                                 <el-tag :type="aiData.isNegative ? 'danger' : 'success'">{{ aiData.isNegative ? '负面情绪' :
@@ -111,6 +118,8 @@
                             </ul>
                         </div>
                     </div>
+                    <!-- 一次性分析失败/未分析（ADR-0005：分析缺失为合法状态，不重试） -->
+                    <div class="ai-analysis-missing" v-else>分析缺失</div>
 
                 </div>
                 <div class="detail-section">
@@ -134,30 +143,40 @@ import TableSearch from '@/components/TableSearch.vue'
 import { getEmotionalPage, deleteEmotional } from '@/api/admin'
 import { ElMessageBox } from 'element-plus'
 
+// 用户自选主要情绪（提交页 8 选项，与管理端映射保持一致）
 const getEmotionTagType = (emotion) => {
     const emotionTypes = {
-        '快乐': 'success',
+        '开心': 'success',
         '平静': 'info',
-        '兴奋': 'warning',
-        '愤怒': 'danger',
+        '焦虑': 'warning',
         '悲伤': 'info',
-        '焦虑': 'warning'
+        '兴奋': 'warning',
+        '疲惫': 'info',
+        '惊讶': 'warning',
+        '困惑': 'info'
     }
     return emotionTypes[emotion] || 'info'
 }
 
+// AI 主要情绪（LLM 自由短语，不设词表——ADR-0004，映射仅决定颜色）
 const getAiEmotionTagType = (emotion) => {
     const emotionTagMap = {
+        '开心': 'success',
         '快乐': 'success',
         '平静': 'success',
-        '兴奋': 'warning',
+        '轻松': 'success',
         '满足': 'success',
-        '愤怒': 'danger',
-        '悲伤': 'info',
+        '兴奋': 'warning',
         '焦虑': 'warning',
+        '压力': 'warning',
+        '愤怒': 'danger',
         '恐惧': 'danger',
+        '悲伤': 'info',
+        '低落': 'info',
+        '失落': 'info',
         '沮丧': 'info',
-        '压力': 'warning'
+        '疲惫': 'info',
+        '困惑': 'info'
     }
     return emotionTagMap[emotion] || 'info'
 }
@@ -284,6 +303,14 @@ onMounted(() => {
 }
 
 // AI分析相关样式
+.ai-analysis-missing {
+    padding: 16px;
+    text-align: center;
+    color: #909399;
+    background: #f8f9fa;
+    border-radius: 4px;
+}
+
 .ai-analysis-status {
     .ai-status-tag {
         margin-bottom: 4px;

@@ -5,14 +5,18 @@ import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import jakarta.validation.constraints.Size;
+import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
 
 @Data
 @TableName("consultation_session")
 @Builder
+@NoArgsConstructor
+@AllArgsConstructor
 public class ConsultationSession {
     // 会话ID
     @TableId(type = IdType.AUTO)
@@ -38,4 +42,8 @@ public class ConsultationSession {
     // 最后一次情绪分析更新时间
     @TableField("last_emotion_updated_at")
     private LocalDateTime lastEmotionUpdatedAt;
+
+    // 软删除标记 false:正常 true:已删除（用户端不可见，管理端可见）
+    @TableField("deleted")
+    private Boolean deleted;
 }

@@ -5,6 +5,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.util.stream.Collectors;
 
@@ -28,5 +29,11 @@ public class GlobarExceptionHandler {
             return Result.error(e.getCode(), e.getMessage(), e.getData());
         }
         return Result.error(e.getCode(), e.getMessage(), null);
+    }
+
+    // 处理上传超限：multipart解析阶段即拒绝（早于业务层校验），需返回友好提示而非连接重置
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public Result<String> handleMaxUploadSize(MaxUploadSizeExceededException e) {
+        return Result.error(ResultCode.FILE_SIZE_EXCEEDED.getCode(), "图片大小不能超过5MB", null);
     }
 }

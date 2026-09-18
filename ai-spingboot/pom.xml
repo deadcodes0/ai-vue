@@ -72,10 +72,16 @@
             <artifactId>hutool-all</artifactId>
             <version>5.8.25</version>
         </dependency>
+        <!-- 富文本 HTML 白名单清洗（知识文章入库前，见 HtmlSanitizer） -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.17.2</version>
+        </dependency>
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-openai</artifactId>
-            <version>1.0.0-SNAPSHOT</version>
+            <version>1.0.0</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>

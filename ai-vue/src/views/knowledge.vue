@@ -23,9 +23,22 @@
                     </div>
                 </template>
             </el-table-column>
+            <el-table-column label="状态" width="100">
+                <template #default="scope">
+                    <!-- 软删除 = 退出生命周期：已删除行只显示删除标记，不再展示生命周期标签 -->
+                    <el-tag v-if="scope.row.deleted" type="danger" size="small">已删除</el-tag>
+                    <el-tag v-else-if="scope.row.status === 0" type="info" size="small">草稿</el-tag>
+                    <el-tag v-else-if="scope.row.status === 1" type="success" size="small">已发布</el-tag>
+                    <el-tag v-else type="warning" size="small">已下线</el-tag>
+                </template>
+            </el-table-column>
             <el-table-column prop="authorName" label="作者" width="150" />
             <el-table-column prop="readCount" label="阅读量" width="150" />
-            <el-table-column prop="updatedAt" label="发布时间" width="150" />
+            <el-table-column label="发布时间" width="150">
+                <template #default="scope">
+                    <span>{{ scope.row.publishedAt ? scope.row.publishedAt.slice(0, 10) : '未发布' }}</span>
+                </template>
+            </el-table-column>
             <el-table-column  label="操作" width="240" fixed="right">
                 <template #default="scope">
                     <el-button @click="handleEdit(scope.row)" text type="primary">编辑</el-button>

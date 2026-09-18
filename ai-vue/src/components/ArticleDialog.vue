@@ -106,8 +106,8 @@ watch(() => props.article, (newVal) => {
             Object.assign(formData, newVal)
             // 使用现有ID
             businessId.value = newVal.id
-            // 封面Url
-            imgUrl.value = fileBaseUrl + newVal.coverImage
+            // 封面Url（无封面时置空，避免拼出 "xxxnull" 的破图地址）
+            imgUrl.value = newVal.coverImage ? fileBaseUrl + newVal.coverImage : ''
         })
     }
 })
@@ -226,7 +226,8 @@ const handleSubmit = () => {
         delete submitData.tagArray
         
         if (!isEdit.value) {
-            submitData.id = businessId.value
+            // 无封面时 businessId 未生成（UUID 仅在上传时创建），兜底生成作文章主键（ADR-0006：客户端生成）
+            submitData.id = businessId.value || crypto.randomUUID()
             createArticle(submitData).then(res => {
                 loading.value = false
                 emit('success')
